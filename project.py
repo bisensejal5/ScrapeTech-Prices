@@ -1,148 +1,196 @@
 import requests
 from bs4 import BeautifulSoup
-from colorthief import ColorThief
-import matplotlib.colors as mcolors
-import re
-import io
-from flask import Flask, request, render_template_string
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from urllib.parse import urljoin
+import pandas as pd
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-app = Flask(__name__)
-
-# HTML templates
-index_html = """
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <title>Color Extractor</title>
-</head>
-<body>
-    <div style="text-align: center;">
-        <h1>Enter a URL to scrape:</h1>
-        <form action="/scrape" method="POST">
-            <input type="text" name="url" placeholder="http://example.com" required style="width: 300px;">
-            <button type="submit">Scrape</button>
-        </form>
-    </div>
-</body>
-</html>
-"""
-
-result_html = """
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <title>Scraping Results</title>
-</head>
-<body>
-    <div style="text-align: center;">
-        <h1>Scraping Results</h1>
-        <p><strong>Logo URL:</strong> <a href="{{ result['logo_url'] }}">{{ result['logo_url'] }}</a></p>
-        <p><strong>Primary Colors:</strong> {{ result['primary_colors'] }}</p>
-        <p><strong>Button Colors:</strong> {{ result['button_colors'] }}</p>
-        <p><strong>Recommended Button Color:</strong> {{ result['recommended_button_color'] }}</p>
-    </div>
-    <div style="text-align: center;">
-        <a href="/">Go back</a>
-    </div>
-</body>
-</html>
-"""
-
-
-# Helper functions
-def get_logo_url(soup, base_url):
-    logo = soup.find('img', {'alt': re.compile('logo', re.I)}) or \
-           soup.find('img', {'src': re.compile('logo', re.I)})
-    if logo and 'src' in logo.attrs:
-        return urljoin(base_url, logo['src'])
-    return None
-
-
-def extract_primary_colors(logo_url):
-    try:
-        response = requests.get(logo_url)
-        response.raise_for_status()
-        color_thief = ColorThief(io.BytesIO(response.content))
-        palette = color_thief.get_palette(color_count=5)
-        hex_palette = [mcolors.rgb2hex(color) for color in palette]
-        return hex_palette
-    except Exception as e:
-        print(f"Failed to extract colors from logo: {e}")
-        return []
-
-
-def get_button_colors(soup):
-    buttons = soup.find_all('button')
-    colors = set()
-    for button in buttons:
-        style = button.get('style')
-        if style:
-            match = re.search(r'background-color:\s*(#[0-9a-fA-F]{6}|rgb\(.+?\));', style)
-            if match:
-                colors.add(match.group(1))
-        classes = button.get('class', [])
-        for class_name in classes:
-            css = soup.find('style', text=re.compile(class_name))
-            if css:
-                match = re.search(
-                    r'\.{}.+?background-color:\s*(#[0-9a-fA-F]{6}|rgb\(.+?\));'.format(re.escape(class_name)),
-                    css.string)
-                if match:
-                    colors.add(match.group(1))
-    return list(colors)
-
-
-def recommend_button_color(primary_colors, button_colors):
-    all_colors = primary_colors + button_colors
-    contrasting_colors = ['#000000', '#ffffff', '#ff5733', '#28a745']
-    for color in contrasting_colors:
-        if color not in all_colors:
-            return color
-    return contrasting_colors[0]
-
-
-def scrape_website(url):
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-    driver.get(url)
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    driver.quit()
-
-    logo_url = get_logo_url(soup, url)
-    primary_colors = extract_primary_colors(logo_url) if logo_url else []
-    button_colors = get_button_colors(soup)
-    recommended_color = recommend_button_color(primary_colors, button_colors)
-
-    return {
-        'logo_url': logo_url,
-        'primary_colors': primary_colors,
-        'button_colors': button_colors,
-        'recommended_button_color': recommended_color
+# Function to extract laptop data from a single page on Amazon
+def fetch_amazon_data(page):
+    url = f"https://www.amazon.in/s?k=laptop&page={page}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
 
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.content, "html.parser")
 
-# Flask routes
-@app.route('/')
-def index():
-    return render_template_string(index_html)
+    # Extract the data for each laptop
+    laptops = []
+    for item in soup.find_all("div", class_="s-result-item"):
+        # Title
+        title = item.find("span", class_="a-size-medium")
+        if not title:
+            continue
+        title = title.text
 
+        # Price
+        price = item.find("span", class_="a-price-whole")
+        if not price:
+            continue
+        price = float(price.text.replace(",", "").replace("₹", "").strip())  # Convert to float
 
-@app.route('/scrape', methods=['POST'])
-def scrape():
-    url = request.form.get('url')
-    if not url:
-        return "No URL provided", 400
+        # Rating
+        rating = item.find("span", class_="a-icon-alt")
+        if rating:
+            rating = float(rating.text.split()[0])
+        else:
+            rating = None
 
-    result = scrape_website(url)
-    return render_template_string(result_html, result=result)
+        # Specifications
+        specs = item.find("div", class_="a-section a-spacing-none a-spacing-top-small")
+        if specs:
+            spec_dict = {}
+            for spec in specs.find_all("span", class_="a-size-base"):
+                if ":" in spec.text:
+                    key, value = spec.text.split(":", 1)
+                    spec_dict[key.strip()] = value.strip()
+        else:
+            spec_dict = {}
 
+        laptop = {"title": title, "price": price, "rating": rating}
+        laptop.update(spec_dict)
+        laptops.append(laptop)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    return laptops
+
+# Function to fetch data from multiple pages
+def fetch_all_data(pages):
+    all_laptops = []
+    for page in range(1, pages + 1):
+        laptops = fetch_amazon_data(page)
+        all_laptops.extend(laptops)
+        print(f"Page {page} scraped, {len(laptops)} laptops found.")
+    return all_laptops
+
+# Fetch data from the first 20 pages
+laptops_data = fetch_all_data(20)
+
+# Convert to DataFrame
+laptops_df = pd.DataFrame(laptops_data)
+
+# Save the scraped data to a CSV file
+laptops_df.to_csv('amazon_laptops_raw.csv', index=False)
+
+# Load the scraped data
+laptops_df = pd.read_csv('amazon_laptops_raw.csv')
+
+# Handle missing values and inconsistent data
+laptops_df.dropna(subset=['price'], inplace=True)
+
+# Function to extract RAM and Storage specifications
+def extract_ram_storage(spec_text):
+    ram = None
+    storage = None
+    if 'RAM' in spec_text:
+        ram = spec_text.split('RAM')[0].strip()
+    if 'SSD' in spec_text or 'HDD' in spec_text:
+        storage = spec_text.split('SSD')[-1].strip()
+    return ram, storage
+
+# Apply extraction function to each row
+laptops_df['RAM'], laptops_df['Storage'] = zip(*laptops_df['title'].apply(extract_ram_storage))
+
+# Drop rows with missing RAM or Storage information
+laptops_df.dropna(subset=['RAM', 'Storage'], inplace=True)
+
+# Convert RAM and Storage to numeric values
+laptops_df['RAM'] = laptops_df['RAM'].str.extract('(\d+)').astype(float)
+laptops_df['Storage'] = laptops_df['Storage'].str.extract('(\d+)').astype(float)
+
+# Save the cleaned data
+laptops_df.to_csv('cleaned_amazon_laptops.csv', index=False)
+
+# EDA
+# Distribution of Prices
+plt.figure(figsize=(10, 6))
+sns.histplot(laptops_df['price'], kde=True)
+plt.title('Distribution of Laptop Prices')
+plt.xlabel('Price (INR)')
+plt.ylabel('Frequency')
+plt.show()
+
+# Relationship between Price and RAM
+plt.figure(figsize=(10, 6))
+sns.scatterplot(x=laptops_df['RAM'], y=laptops_df['price'])
+plt.title('Price vs RAM')
+plt.xlabel('RAM (GB)')
+plt.ylabel('Price (INR)')
+plt.show()
+
+# Relationship between Price and Storage
+plt.figure(figsize=(10, 6))
+sns.scatterplot(x=laptops_df['Storage'], y=laptops_df['price'])
+plt.title('Price vs Storage')
+plt.xlabel('Storage (GB)')
+plt.ylabel('Price (INR)')
+plt.show()
+
+# Additional: Price vs RAM and Price vs Storage in one figure
+plt.figure(figsize=(10, 6))
+plt.subplot(1, 2, 1)
+sns.scatterplot(x=laptops_df['RAM'], y=laptops_df['price'])
+plt.title('Price vs RAM')
+plt.xlabel('RAM (GB)')
+plt.ylabel('Price (INR)')
+
+plt.subplot(1, 2, 2)
+sns.scatterplot(x=laptops_df['Storage'], y=laptops_df['price'])
+plt.title('Price vs Storage')
+plt.xlabel('Storage (GB)')
+plt.ylabel('Price (INR)')
+
+plt.tight_layout()
+plt.show()
+
+# Correlation Matrix
+plt.figure(figsize=(10, 6))
+corr_matrix = laptops_df[['price', 'RAM', 'Storage']].corr()
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
+plt.title('Correlation Matrix')
+plt.show()
+
+# Features and Target
+X = laptops_df[['RAM', 'Storage']]
+y = laptops_df['price']
+
+# Split the data into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train a Linear Regression model
+lr_model = LinearRegression()
+lr_model.fit(X_train, y_train)
+
+# Predictions and Evaluation
+y_pred_lr = lr_model.predict(X_test)
+print("Linear Regression RMSE:", mean_squared_error(y_test, y_pred_lr, squared=False))
+print("Linear Regression R^2:", r2_score(y_test, y_pred_lr))
+
+# Train a Random Forest model
+rf_model = RandomForestRegressor(random_state=42)
+rf_model.fit(X_train, y_train)
+
+# Predictions and Evaluation
+y_pred_rf = rf_model.predict(X_test)
+print("Random Forest RMSE:", mean_squared_error(y_test, y_pred_rf, squared=False))
+print("Random Forest R^2:", r2_score(y_test, y_pred_rf))
+
+# Hyperparameter Tuning for Random Forest
+param_grid = {
+    'n_estimators': [50, 100, 200],
+    'max_depth': [10, 20, 30, None],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
+grid_search = GridSearchCV(estimator=rf_model, param_grid=param_grid, cv=5, n_jobs=-1, verbose=2)
+grid_search.fit(X_train, y_train)
+
+# Best parameters and model evaluation
+best_rf_model = grid_search.best_estimator_
+y_pred_best_rf = best_rf_model.predict(X_test)
+print("Best Random Forest RMSE:", mean_squared_error(y_test, y_pred_best_rf, squared=False))
+print("Best Random Forest R^2:", r2_score(y_test, y_pred_best_rf))
+print("Best Parameters:", grid_search.best_params_)
